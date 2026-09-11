@@ -17,7 +17,11 @@ Including another URLconf
 
 from django.contrib import admin
 from django.urls import path
+from cart.views import add_to_cart, cart_detail
+
 
 urlpatterns = [
     path("admin/", admin.site.urls),
+    path("cart/", cart_detail, name="cart_detail"),
+    path("cart/add/", add_to_cart, name="add_to_cart"),
 ]
