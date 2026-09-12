@@ -5,7 +5,10 @@ This module contains test cases for:
 get_or_create_cart
 cart_detail
 add_to_cart
-
+remove_from_cart
+update_cart_quantity
+clear_cart
+wishlist_detail
 """
 
 from decimal import Decimal, InvalidOperation
@@ -112,6 +115,36 @@ class CartDetailTest(TestCase):
         self.assertTrue(response.url.startswith("/accounts/login/"))
         self.assertIn("next=", response.url)
 
+# issue
+    def test_total_price_type_when_cart_empty(self):
+        """
+        BUG: sum() over an empty queryset returns int 0, not Decimal("0.00"),
+        so total_price is "0" for an empty cart but "X.XX" once items exist.
+        Inconsistent client-facing format.
+        """
+        cart = Cart.objects.create(user=self.user)
+        self.assertEqual(cart.get_total_price(), 0)
+        self.assertNotIsInstance(cart.get_total_price(), Decimal)
+
+    def test_total_price_string_format_inconsistent_when_empty(self):
+        """
+        BUG: same root cause as test_total_price_type_when_cart_empty, but
+        shown at the string/JSON level that clients actually see. An empty
+        cart's total_price serializes to "0", not "0.00" — so str(total_price)
+        is neither equal to the int 0 nor to the Decimal-formatted "0.00"
+        clients get once the cart has items.
+        """
+        cart = Cart.objects.create(user=self.user)
+
+        empty_total = cart.get_total_price()
+        self.assertEqual(str(empty_total), "0")
+        self.assertNotEqual(str(empty_total), "0.00")
+
+        cart.add_item(product_id="test-product", quantity=1, price=Decimal("0.00"))
+        zero_priced_total = cart.get_total_price()
+        self.assertEqual(str(zero_priced_total), "0.00")
+        self.assertNotEqual(str(zero_priced_total), "0")
+
 
 class AddToCartTest(TestCase):
     def setUp(self):
@@ -122,7 +155,23 @@ class AddToCartTest(TestCase):
         )
         self.client.login(username="testuser", password="testpass123")
 
-# product_id - CharField
+# auth
+    def test_anonymous_user_redirected_to_login(self):
+        self.client.logout()
+        response = self.client.post(reverse("add_to_cart"), {
+            "product_id": "test-product", "quantity": 1, "price": "10.00",
+        })
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(response.url.startswith("/accounts/login/"))
+
+    def test_get_request_rejected(self):
+        """
+        require_POST should 405 a GET without running the view body
+        """
+        response = self.client.get(reverse("add_to_cart"))
+        self.assertEqual(response.status_code, 405)
+
+# product_id - edge
     def test_product_id_exceeds_max_length(self):
         """
         BUG: view never validates product_id length before saving.
@@ -139,7 +188,21 @@ class AddToCartTest(TestCase):
         })
         self.assertEqual(response.status_code, 200)
 
-# quantity - PositiveIntegerField
+    def test_no_product_id(self):
+        response = self.client.post(reverse("add_to_cart"), {
+            "quantity": 1, "price": "10.00",
+        })
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"], "Product ID is required")
+
+    def test_empty_product_id(self):
+        response = self.client.post(reverse("add_to_cart"), {
+            "product_id": "", "quantity": 1, "price": "10.00",
+        })
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"], "Product ID is required")
+
+# quantity - edge
     def test_quantity_negative(self):
         """
         BUG: PositiveIntegerField's CHECK constraint blocks this at the DB,
@@ -218,7 +281,30 @@ class AddToCartTest(TestCase):
         self.assertTrue(data["success"])
         self.assertEqual(data["total_items"], 10**9)
 
-# price - DecimalField
+    def test_quantity_non_numeric_string(self):
+        """
+        BUG: quantity = int(request.POST.get("quantity", 1)) runs BEFORE
+        the product_id check, so a non-numeric quantity crashes with an
+        uncaught ValueError -> 500, even if product_id is also missing.
+
+        PROPOSING FIX: wrap the int() cast in try/except, return 400.
+        """
+        with self.assertRaises(ValueError):
+            self.client.post(reverse("add_to_cart"), {
+                "product_id": "test-product", "quantity": "abc", "price": "10.00",
+            })
+
+    def test_quantity_float_string(self):
+        """
+        BUG: int("2.5") also raises ValueError -- floats look like valid
+        form input but aren't accepted.
+        """
+        with self.assertRaises(ValueError):
+            self.client.post(reverse("add_to_cart"), {
+                "product_id": "test-product", "quantity": "2.5", "price": "10.00",
+            })
+
+# price - edge
     def test_price_negative(self):
         """
         BUG: no sign check anywhere, silently succeeds with a negative price
@@ -259,17 +345,451 @@ class AddToCartTest(TestCase):
                 "product_id": "test-product", "quantity": 1, "price": "99999999999.99",
             })
 
-    def test_anonymous_user_redirected_to_login(self):
-        self.client.logout()
+    def test_price_non_numeric_string(self):
+        """
+        BUG: price is never cast/validated in the view -- the raw string
+        is stored as-is and only breaks later. Verify exact failure mode
+        (may be ValueError, TypeError, or InvalidOperation depending on
+        where the bad string first gets used arithmetically) and pin down
+        the real exception before relying on this assertion.
+
+        PROPOSING FIX: parse price with Decimal(...) in the view inside a
+        try/except InvalidOperation, return 400 on failure.
+        """
+        with self.assertRaises(Exception):
+            self.client.post(reverse("add_to_cart"), {
+                "product_id": "test-product", "quantity": 1, "price": "abc",
+            })
+
+# expected
+    def test_extra_data_passed_to_cart_item_expected(self):
         response = self.client.post(reverse("add_to_cart"), {
             "product_id": "test-product", "quantity": 1, "price": "10.00",
+            "color": "red", "size": "M",
+        })
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertTrue(data["success"])
+        self.assertEqual(data["message"], "Item added to cart")
+        self.assertEqual(data["total_items"], 1)
+        self.assertEqual(data["total_price"], "10.00")
+
+        item = CartItem.objects.get(id=data["item_id"])
+        self.assertEqual(item.extra_data, {"color": "red", "size": "M"})
+
+    def test_no_extra_data_passed_to_cart_item_expected(self):
+        response = self.client.post(reverse("add_to_cart"), {
+            "product_id": "test-product", "quantity": 1, "price": "10.00",
+        })
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertTrue(data["success"])
+        self.assertEqual(data["message"], "Item added to cart")
+        self.assertEqual(data["total_items"], 1)
+        self.assertEqual(data["total_price"], "10.00")
+
+        item = CartItem.objects.get(id=data["item_id"])
+        self.assertEqual(item.extra_data, {})
+
+
+class RemoveFromCartTest(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="testuser",
+            password="testpass123",
+            email="test@example.com",
+        )
+        self.client.login(username="testuser", password="testpass123")
+# auth
+    def test_anonymous_user_redirected_to_login(self):
+        self.client.logout()
+        response = self.client.post(reverse("remove_from_cart"), {"item_id": 1})
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(response.url.startswith("/accounts/login/"))
+
+    def test_get_request_rejected(self):
+        response = self.client.get(reverse("remove_from_cart"))
+        self.assertEqual(response.status_code, 405)
+
+# item_id - edge
+    def test_no_item_id(self):
+        response = self.client.post(reverse("remove_from_cart"), {})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"], "Item ID is required")
+
+    def test_empty_item_id(self):
+        response = self.client.post(reverse("remove_from_cart"), {"item_id": ""})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"], "Item ID is required")
+
+    def test_nonexistent_item_id(self):
+        """
+        item_id well-formed but no such CartItem exists.
+        """
+        cart = Cart.objects.create(user=self.user)
+        response = self.client.post(reverse("remove_from_cart"), {"item_id": 99999})
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertTrue(data["success"])
+        self.assertEqual(data["message"], "Item removed from cart")
+        self.assertEqual(data["total_items"], 0)
+        self.assertEqual(data["total_price"], "0")
+
+    def test_malformed_item_id_non_numeric(self):
+        """
+        BUG: cart.remove_item(item_id) -> self.items.filter(id=item_id).delete()
+        Django tries to coerce item_id to int for the id lookup; a
+        non-numeric string raises an uncaught ValueError -> 500 instead
+        of a clean 400.
+
+        PROPOSING FIX: validate item_id is numeric before calling
+        remove_item, same fix pattern as add_to_cart/update_cart_quantity.
+        """
+        cart = Cart.objects.create(user=self.user)
+        with self.assertRaises(ValueError):
+            self.client.post(reverse("remove_from_cart"), {"item_id": "abc"})
+
+# expected
+    def test_success_response_shape(self):
+        cart = Cart.objects.create(user=self.user)
+        item = cart.add_item(product_id="test-product", quantity=2, price=Decimal("10.00"))
+
+        response = self.client.post(reverse("remove_from_cart"), {"item_id": item.id})
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(
+            set(data.keys()),
+            {"success", "message", "total_items", "total_price"},
+        )
+        self.assertTrue(data["success"])
+        self.assertEqual(data["message"], "Item removed from cart")
+        self.assertEqual(data["total_items"], 0)
+        self.assertEqual(data["total_price"], "0")
+
+        self.assertFalse(CartItem.objects.filter(id=item.id).exists())
+
+
+class UpdateCartQuantityTest(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="testuser",
+            password="testpass123",
+            email="test@example.com",
+        )
+        self.client.login(username="testuser", password="testpass123")
+
+# auth
+    def test_anonymous_user_redirected_to_login(self):
+        self.client.logout()
+        response = self.client.post(reverse("update_cart_quantity"), {
+            "item_id": 1, "quantity": 2,
         })
         self.assertEqual(response.status_code, 302)
         self.assertTrue(response.url.startswith("/accounts/login/"))
 
     def test_get_request_rejected(self):
-        """
-        require_POST should 405 a GET without running the view body
-        """
-        response = self.client.get(reverse("add_to_cart"))
+        response = self.client.get(reverse("update_cart_quantity"))
         self.assertEqual(response.status_code, 405)
+
+# item_id - edge
+    def test_no_item_id(self):
+        response = self.client.post(reverse("update_cart_quantity"), {"quantity": 2})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"], "Item ID is required")
+
+    def test_empty_item_id(self):
+        response = self.client.post(reverse("update_cart_quantity"), {
+            "item_id": "", "quantity": 2,
+        })
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"], "Item ID is required")
+
+    def test_nonexistent_item_id(self):
+        """
+        item_id well-formed (numeric) but no such CartItem exists.
+        View correctly catches CartItem.DoesNotExist -> 404.
+        """
+        cart = Cart.objects.create(user=self.user)
+        response = self.client.post(reverse("update_cart_quantity"), {
+            "item_id": 99999, "quantity": 2,
+        })
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["error"], "Item not found")
+
+    def test_malformed_item_id_non_numeric(self):
+        """
+        BUG: item_id="abc" isn't a Django lookup error the view catches.
+        cart.update_quantity -> self.items.get(id=item_id) raises
+        ValueError on a non-numeric string, not CartItem.DoesNotExist,
+        so it's uncaught -> 500 instead of a clean 400/404.
+
+        PROPOSING FIX: validate item_id is numeric before calling
+        update_quantity, same as int(item_id) guarded with try/except.
+        """
+        cart = Cart.objects.create(user=self.user)
+        with self.assertRaises(ValueError):
+            self.client.post(reverse("update_cart_quantity"), {
+                "item_id": "abc", "quantity": 2,
+            })
+
+# quantity - edge
+    def test_quantity_zero(self):
+        response = self.client.post(reverse("update_cart_quantity"), {
+            "item_id": 1, "quantity": 0,
+        })
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"], "Quantity must be greater than 0")
+
+    def test_quantity_negative(self):
+        response = self.client.post(reverse("update_cart_quantity"), {
+            "item_id": 1, "quantity": -5,
+        })
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"], "Quantity must be greater than 0")
+
+    def test_quantity_non_numeric_string(self):
+        """
+        BUG: quantity = int(request.POST.get("quantity", 1)) runs BEFORE
+        the item_id check, so a non-numeric quantity raises an uncaught
+        ValueError -> 500, regardless of whether item_id is valid.
+
+        PROPOSING FIX: wrap the int() cast in try/except and return 400.
+        """
+        with self.assertRaises(ValueError):
+            self.client.post(reverse("update_cart_quantity"), {
+                "item_id": 1, "quantity": "abc",
+            })
+
+    def test_quantity_float_string(self):
+        """
+        BUG: int("2.5") also raises ValueError -- floats aren't accepted
+        even though they look like valid POST input from a form.
+        """
+        with self.assertRaises(ValueError):
+            self.client.post(reverse("update_cart_quantity"), {
+                "item_id": 1, "quantity": "2.5",
+            })
+
+    def test_quantity_missing_defaults_to_one(self):
+        """
+        No BUG here -- documents current behavior: missing quantity
+        silently defaults to 1 rather than erroring.
+        """
+        cart = Cart.objects.create(user=self.user)
+        item = cart.add_item(product_id="test-product", quantity=5, price=Decimal("10.00"))
+
+        response = self.client.post(reverse("update_cart_quantity"), {"item_id": item.id})
+        self.assertEqual(response.status_code, 200)
+        item.refresh_from_db()
+        self.assertEqual(item.quantity, 1)
+
+    def test_quantity_extremely_large(self):
+        """
+        BUG: no upper bound on quantity, same as add_to_cart.
+
+        PROPOSING FIX: add a sane max quantity check, shared with add_to_cart.
+        """
+        cart = Cart.objects.create(user=self.user)
+        item = cart.add_item(product_id="test-product", quantity=1, price=Decimal("10.00"))
+
+        response = self.client.post(reverse("update_cart_quantity"), {
+            "item_id": item.id, "quantity": 10**9,
+        })
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertTrue(data["success"])
+        self.assertEqual(data["total_items"], 10**9)
+
+# expected
+    def test_success_response_shape(self):
+        cart = Cart.objects.create(user=self.user)
+        item = cart.add_item(product_id="test-product", quantity=1, price=Decimal("10.00"))
+
+        response = self.client.post(reverse("update_cart_quantity"), {
+            "item_id": item.id, "quantity": 3,
+        })
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(
+            set(data.keys()),
+            {"success", "message", "total_items", "total_price"},
+        )
+        self.assertTrue(data["success"])
+        self.assertEqual(data["message"], "Quantity updated")
+        self.assertEqual(data["total_items"], 3)
+        self.assertEqual(data["total_price"], "30.00")
+
+        item.refresh_from_db()
+        self.assertEqual(item.quantity, 3)
+
+
+class ClearCartTest(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="testuser",
+            password="testpass123",
+            email="test@example.com",
+        )
+        self.client.login(username="testuser", password="testpass123")
+
+# auth
+    def test_anonymous_user_redirected_to_login(self):
+        self.client.logout()
+        response = self.client.get(reverse("clear_cart"))
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(response.url.startswith("/accounts/login/"))
+
+    def test_post_request_allowed(self):
+        """
+        BUG: unlike add_to_cart/remove_from_cart/update_cart_quantity,
+        clear_cart has no @require_POST decorator -- GET is allowed to
+        mutate state. This violates the "GET must be safe" HTTP convention
+        and means clearing a cart could be triggered by a prefetch, a
+        crawler, or a link preview.
+
+        PROPOSING FIX: add @require_POST to clear_cart, same as the
+        other mutating views.
+        """
+        cart = Cart.objects.create(user=self.user)
+        cart.add_item(product_id="test-product", quantity=2, price=Decimal("10.00"))
+
+        response = self.client.get(reverse("clear_cart"))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(cart.items.count(), 0)  # GET alone cleared the cart
+
+# expected
+    def test_success_response_shape(self):
+        cart = Cart.objects.create(user=self.user)
+        cart.add_item(product_id="test-product", quantity=2, price=Decimal("10.00"))
+
+        response = self.client.get(reverse("clear_cart"))
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(
+            set(data.keys()),
+            {"success", "message", "total_items", "total_price"},
+        )
+        self.assertTrue(data["success"])
+        self.assertEqual(data["message"], "Cart cleared")
+        self.assertEqual(data["total_items"], 0)
+        self.assertEqual(data["total_price"], "0.00")
+
+    def test_clears_all_items(self):
+        cart = Cart.objects.create(user=self.user)
+        cart.add_item(product_id="product-1", quantity=2, price=Decimal("10.00"))
+        cart.add_item(product_id="product-2", quantity=1, price=Decimal("5.00"))
+        self.assertEqual(cart.items.count(), 2)
+
+        response = self.client.get(reverse("clear_cart"))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(cart.items.count(), 0)
+        self.assertFalse(CartItem.objects.filter(cart=cart).exists())
+
+    def test_clear_already_empty_cart(self):
+        """
+        Clearing a cart with no items is a safe no-op, not an error.
+        """
+        cart = Cart.objects.create(user=self.user)
+        response = self.client.get(reverse("clear_cart"))
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertTrue(data["success"])
+        self.assertEqual(data["total_items"], 0)
+
+    def test_clear_creates_cart_if_none_exists(self):
+        """
+        get_or_create_cart means clearing on a user with no cart yet
+        doesn't error -- it creates an empty cart first, then clears it.
+        """
+        self.assertFalse(Cart.objects.filter(user=self.user).exists())
+        response = self.client.get(reverse("clear_cart"))
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(Cart.objects.filter(user=self.user).exists())
+
+# issue
+    def test_total_price_response_hardcoded_not_computed(self):
+        """
+        Documents current behavior: total_price is a hardcoded "0.00"
+        string literal in the view, not cart.get_total_price(). This
+        happens to be correct after a real clear, but it's not actually
+        reading the cart state -- if clear() ever partially failed, the
+        response would still falsely report "0.00".
+        """
+        cart = Cart.objects.create(user=self.user)
+        cart.add_item(product_id="test-product", quantity=1, price=Decimal("10.00"))
+
+        response = self.client.get(reverse("clear_cart"))
+        data = response.json()
+        self.assertEqual(data["total_price"], "0.00")
+        self.assertIsInstance(data["total_price"], str)
+
+
+class WishListDetail(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="testuser",
+            password="testpass123",
+            email="test@example.com",
+        )
+        self.client.login(username="testuser", password="testpass123")
+
+# auth
+    def test_anonymous_user_redirected_to_login(self):
+        self.client.logout()
+        response = self.client.get(reverse("wishlist_detail"))
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(response.url.startswith("/accounts/login/"))
+        self.assertIn("next=", response.url)
+
+    def test_get_request_allowed(self):
+        """
+        No require_POST on this view -- it's a read/display view, GET
+        is the correct and only expected method. No POST-rejection test
+        needed here, unlike the mutating views.
+        """
+        response = self.client.get(reverse("wishlist_detail"))
+        self.assertEqual(response.status_code, 200)
+
+# expected
+    def test_auth_user_no_wishlist_yet(self):
+        """
+        get_or_create means a wishlist is created on first visit if
+        one doesn't already exist.
+        """
+        self.assertFalse(Wishlist.objects.filter(user=self.user).exists())
+        response = self.client.get(reverse("wishlist_detail"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNotNone(response.context["wishlist"])
+        self.assertEqual(response.context["product_count"], 0)
+        self.assertTrue(Wishlist.objects.filter(user=self.user).exists())
+
+    def test_auth_user_with_empty_wishlist(self):
+        existing_wishlist = Wishlist.objects.create(user=self.user)
+        response = self.client.get(reverse("wishlist_detail"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context["wishlist"], existing_wishlist)
+        self.assertEqual(response.context["product_count"], 0)
+
+    def test_auth_user_with_nonempty_wishlist(self):
+        existing_wishlist = Wishlist.objects.create(user=self.user)
+        existing_wishlist.add_product("product-1")
+        existing_wishlist.add_product("product-2")
+
+        response = self.client.get(reverse("wishlist_detail"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context["wishlist"], existing_wishlist)
+        self.assertEqual(response.context["product_count"], 2)
+
+    def test_does_not_create_duplicate_wishlist(self):
+        """
+        edge: mirrors GetOrCreateCartTest.test_returns_existing_cart_for_authenticated_user
+        -- max 1 wishlist per user, repeated visits shouldn't create more.
+        """
+        existing_wishlist = Wishlist.objects.create(user=self.user)
+        self.client.get(reverse("wishlist_detail"))
+        self.client.get(reverse("wishlist_detail"))
+
+        self.assertEqual(Wishlist.objects.filter(user=self.user).count(), 1)
