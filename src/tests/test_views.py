@@ -9,6 +9,8 @@ remove_from_cart
 update_cart_quantity
 clear_cart
 wishlist_detail
+add_to_wishlist
+remove_from_wishlist
 """
 
 from decimal import Decimal, InvalidOperation
@@ -16,7 +18,7 @@ from decimal import Decimal, InvalidOperation
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import AnonymousUser
 from django.db.utils import IntegrityError
-from django.test import TestCase, RequestFactory
+from django.test import TestCase, RequestFactory, Client
 from django.urls import reverse
 
 from cart.models import Cart, CartItem, Wishlist
@@ -170,6 +172,41 @@ class AddToCartTest(TestCase):
         """
         response = self.client.get(reverse("add_to_cart"))
         self.assertEqual(response.status_code, 405)
+
+    def test_csrf_token_not_leaked_into_extra_data(self):
+        """
+        BUG: the extra_data collection loop only excludes
+        ["product_id", "quantity", "price"] -- it doesn't exclude
+        Django's csrfmiddlewaretoken. With CSRF enforcement on, a real
+        browser form POST includes this field, and it gets swept into
+        extra_data and persisted on the CartItem.
+
+        This test documents the bug by asserting it IS currently present
+        (so the suite passes today). Once fixed, this assertion should
+        be flipped to assertNotIn.
+
+        PROPOSING FIX: add "csrfmiddlewaretoken" to the excluded keys
+        list in add_to_cart's extra_data loop.
+        """
+        from django.middleware.csrf import get_token
+
+        csrf_client = Client(enforce_csrf_checks=True)
+        csrf_client.login(username="testuser", password="testpass123")
+
+        factory = RequestFactory()
+        request = factory.get("/")
+        request.session = csrf_client.session
+        csrf_token = get_token(request)
+        csrf_client.cookies["csrftoken"] = csrf_token
+
+        response = csrf_client.post(reverse("add_to_cart"), {
+            "product_id": "test-product", "quantity": 1, "price": "10.00",
+            "csrfmiddlewaretoken": csrf_token,
+        })
+        self.assertEqual(response.status_code, 200)
+
+        item = CartItem.objects.get(id=response.json()["item_id"])
+        self.assertIn("csrfmiddlewaretoken", item.extra_data)  # BUG: should be assertNotIn
 
 # product_id - edge
     def test_product_id_exceeds_max_length(self):
@@ -331,6 +368,24 @@ class AddToCartTest(TestCase):
         data = response.json()
         self.assertTrue(data["success"])
         self.assertEqual(data["total_price"], "0.00")
+
+    def test_price_missing_defaults_to_zero(self):
+        """
+        No BUG -- documents current behavior. price = request.POST.get("price")
+        returns None when the key is absent entirely (not "0.00"), and
+        add_item's `price or Decimal("0.00")` catches that None and
+        defaults it to zero.
+        """
+        response = self.client.post(reverse("add_to_cart"), {
+            "product_id": "test-product", "quantity": 1,
+        })
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertTrue(data["success"])
+        self.assertEqual(data["total_price"], "0.00")
+
+        item = CartItem.objects.get(id=data["item_id"])
+        self.assertEqual(item.price, Decimal("0.00"))
 
     def test_price_exceeds_max_digits(self):
         """
@@ -724,7 +779,7 @@ class ClearCartTest(TestCase):
         self.assertIsInstance(data["total_price"], str)
 
 
-class WishListDetail(TestCase):
+class WishListDetailTest(TestCase):
     def setUp(self):
         self.user = User.objects.create_user(
             username="testuser",
@@ -750,6 +805,18 @@ class WishListDetail(TestCase):
         response = self.client.get(reverse("wishlist_detail"))
         self.assertEqual(response.status_code, 200)
 
+    def test_deleted_user_with_stale_session(self):
+        """
+        edge: user is deleted mid-session (e.g. admin deletes the account)
+        but the session cookie is still valid. AuthenticationMiddleware
+        resolves request.user to AnonymousUser once the pk no longer
+        exists, so login_required correctly redirects rather than
+        crashing on a dangling FK.
+        """
+        self.user.delete()
+        response = self.client.get(reverse("wishlist_detail"))
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(response.url.startswith("/accounts/login/"))
 # expected
     def test_auth_user_no_wishlist_yet(self):
         """
@@ -793,3 +860,325 @@ class WishListDetail(TestCase):
         self.client.get(reverse("wishlist_detail"))
 
         self.assertEqual(Wishlist.objects.filter(user=self.user).count(), 1)
+
+    # has_product / get_product_count, exercised via the wishlist the view creates
+    def test_has_product_true_after_view_creates_wishlist(self):
+        response = self.client.get(reverse("wishlist_detail"))
+        wishlist = response.context["wishlist"]
+        wishlist.add_product("product-1")
+
+        self.assertTrue(wishlist.has_product("product-1"))
+
+    def test_has_product_false_for_untracked_product(self):
+        response = self.client.get(reverse("wishlist_detail"))
+        wishlist = response.context["wishlist"]
+        wishlist.add_product("product-1")
+
+        self.assertFalse(wishlist.has_product("product-2"))
+
+    def test_has_product_type_mismatch_int_vs_str(self):
+        """
+        BUG: product_ids is a raw JSONField list, "in" does exact type
+        comparison. Adding the int 1 then checking has_product("1")
+        (string) incorrectly returns False.
+
+        PROPOSING FIX: normalize product_id to str on add/has/remove.
+        """
+        response = self.client.get(reverse("wishlist_detail"))
+        wishlist = response.context["wishlist"]
+        wishlist.add_product(1)
+
+        self.assertTrue(wishlist.has_product(1))
+        self.assertFalse(wishlist.has_product("1"))
+
+    def test_get_product_count_matches_context_after_more_adds(self):
+        response = self.client.get(reverse("wishlist_detail"))
+        wishlist = response.context["wishlist"]
+        wishlist.add_product("product-1")
+        wishlist.add_product("product-2")
+        wishlist.add_product("product-3")
+
+        self.assertEqual(wishlist.get_product_count(), 3)
+
+        # confirm the view's context reflects it on a fresh request too
+        response = self.client.get(reverse("wishlist_detail"))
+        self.assertEqual(response.context["product_count"], 3)
+
+    def test_get_product_count_ignores_duplicate_adds(self):
+        response = self.client.get(reverse("wishlist_detail"))
+        wishlist = response.context["wishlist"]
+        wishlist.add_product("product-1")
+        wishlist.add_product("product-1")
+
+        self.assertEqual(wishlist.get_product_count(), 1)
+
+
+class AddToWishlistTest(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="testuser",
+            password="testpass123",
+            email="test@example.com",
+        )
+        self.client.login(username="testuser", password="testpass123")
+
+# auth
+    def test_anonymous_user_redirected_to_login(self):
+        self.client.logout()
+        response = self.client.post(reverse("add_to_wishlist"), {"product_id": "product-1"})
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(response.url.startswith("/accounts/login/"))
+
+    def test_get_request_rejected(self):
+        response = self.client.get(reverse("add_to_wishlist"))
+        self.assertEqual(response.status_code, 405)
+
+# product_id - edge
+    def test_no_product_id(self):
+        response = self.client.post(reverse("add_to_wishlist"), {})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"], "Product ID is required")
+
+    def test_empty_product_id(self):
+        response = self.client.post(reverse("add_to_wishlist"), {"product_id": ""})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"], "Product ID is required")
+
+    def test_product_id_extremely_long(self):
+        """
+        No BUG here (unlike cart's product_id, which is a CharField(255)
+        with a real DB limit) -- Wishlist.product_ids is a JSONField list
+        with no length constraint on individual entries, so an oversized
+        string is accepted and stored as-is. Documents current behavior.
+        """
+        long_id = "x" * 10000
+        response = self.client.post(reverse("add_to_wishlist"), {"product_id": long_id})
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertTrue(data["success"])
+
+        wishlist = Wishlist.objects.get(user=self.user)
+        self.assertIn(long_id, wishlist.product_ids)
+
+    def test_product_id_numeric_string_stored_as_string(self):
+        """
+        POST data always arrives as a string, even for a numeric-looking
+        product_id like "123". Confirms it's stored as the string "123",
+        not coerced to the int 123 -- relevant given has_product's
+        int-vs-str mismatch bug documented elsewhere.
+        """
+        response = self.client.post(reverse("add_to_wishlist"), {"product_id": "123"})
+        self.assertEqual(response.status_code, 200)
+
+        wishlist = Wishlist.objects.get(user=self.user)
+        self.assertIn("123", wishlist.product_ids)
+        self.assertNotIn(123, wishlist.product_ids)
+
+    def test_duplicate_product_id_not_added_twice(self):
+        """
+        add_product's own guard prevents duplicates -- product_count
+        shouldn't increase on a repeat add of the same id.
+        """
+        self.client.post(reverse("add_to_wishlist"), {"product_id": "product-1"})
+        response = self.client.post(reverse("add_to_wishlist"), {"product_id": "product-1"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["product_count"], 1)
+
+# expected / message
+    def test_success_response_shape(self):
+        response = self.client.post(reverse("add_to_wishlist"), {"product_id": "product-1"})
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(
+            set(data.keys()),
+            {"success", "message", "product_count"},
+        )
+        self.assertTrue(data["success"])
+        self.assertEqual(data["message"], "Product added to wishlist")
+        self.assertEqual(data["product_count"], 1)
+
+    def test_error_message_matches_exactly(self):
+        response = self.client.post(reverse("add_to_wishlist"), {})
+        self.assertEqual(response.status_code, 400)
+        data = response.json()
+        self.assertEqual(set(data.keys()), {"error"})
+        self.assertEqual(data["error"], "Product ID is required")
+
+    def test_product_count_increments_across_multiple_distinct_adds(self):
+        r1 = self.client.post(reverse("add_to_wishlist"), {"product_id": "product-1"})
+        self.assertEqual(r1.json()["product_count"], 1)
+
+        r2 = self.client.post(reverse("add_to_wishlist"), {"product_id": "product-2"})
+        self.assertEqual(r2.json()["product_count"], 2)
+
+        r3 = self.client.post(reverse("add_to_wishlist"), {"product_id": "product-3"})
+        self.assertEqual(r3.json()["product_count"], 3)
+
+    def test_creates_wishlist_if_none_exists(self):
+        self.assertFalse(Wishlist.objects.filter(user=self.user).exists())
+        response = self.client.post(reverse("add_to_wishlist"), {"product_id": "product-1"})
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(Wishlist.objects.filter(user=self.user).exists())
+
+
+class ModelStrMethodsTest(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="testuser",
+            password="testpass123",
+            email="test@example.com",
+        )
+
+    def test_cart_str(self):
+        cart = Cart.objects.create(user=self.user)
+        self.assertEqual(str(cart), f"Cart #{cart.id} - {self.user}")
+
+    def test_cart_item_str(self):
+        cart = Cart.objects.create(user=self.user)
+        item = cart.add_item(product_id="test-product", quantity=3, price=Decimal("10.00"))
+        self.assertEqual(str(item), f"3 x test-product (cart #{cart.id})")
+
+    def test_wishlist_str(self):
+        wishlist = Wishlist.objects.create(user=self.user)
+        self.assertEqual(str(wishlist), f"Wishlist #{wishlist.id} - {self.user}")
+
+
+class RemoveFromWishlistTest(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username="testuser",
+            password="testpass123",
+            email="test@example.com",
+        )
+        self.client.login(username="testuser", password="testpass123")
+
+# auth
+    def test_anonymous_user_redirected_to_login(self):
+        self.client.logout()
+        response = self.client.post(reverse("remove_from_wishlist"), {"product_id": "product-1"})
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(response.url.startswith("/accounts/login/"))
+
+    def test_get_request_rejected(self):
+        response = self.client.get(reverse("remove_from_wishlist"))
+        self.assertEqual(response.status_code, 405)
+
+# product_id - edge
+    def test_no_product_id(self):
+        response = self.client.post(reverse("remove_from_wishlist"), {})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"], "Product ID is required")
+
+    def test_empty_product_id(self):
+        response = self.client.post(reverse("remove_from_wishlist"), {"product_id": ""})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"], "Product ID is required")
+
+    def test_nonexistent_product_id_is_noop(self):
+        """
+        remove_product's own "if product_id in self.product_ids" guard
+        means removing a product that was never added is a safe no-op,
+        not an error -- same pattern as remove_from_cart's nonexistent
+        item_id case.
+        """
+        wishlist = Wishlist.objects.create(user=self.user)
+        wishlist.add_product("product-1")
+
+        response = self.client.post(reverse("remove_from_wishlist"), {"product_id": "does-not-exist"})
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertTrue(data["success"])
+        self.assertEqual(data["product_count"], 1)  # unaffected
+
+    def test_remove_from_empty_wishlist_is_noop(self):
+        wishlist = Wishlist.objects.create(user=self.user)
+        response = self.client.post(reverse("remove_from_wishlist"), {"product_id": "anything"})
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertTrue(data["success"])
+        self.assertEqual(data["product_count"], 0)
+
+    def test_product_id_type_mismatch_int_vs_str_fails_to_remove(self):
+        """
+        BUG: same root cause as has_product's int-vs-str mismatch.
+        POST data always arrives as a string, so if a product was ever
+        added as the int 1 (e.g. via direct model use, not this view),
+        remove_from_wishlist's string "1" will never match it via
+        remove_product's "in" check -- the int entry is stuck forever
+        through this endpoint.
+
+        PROPOSING FIX: normalize product_id to str consistently across
+        add_product/remove_product/has_product.
+        """
+        wishlist = Wishlist.objects.create(user=self.user)
+        wishlist.add_product(1)  # stored as int
+        self.assertEqual(wishlist.get_product_count(), 1)
+
+        response = self.client.post(reverse("remove_from_wishlist"), {"product_id": "1"})
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertTrue(data["success"])
+        self.assertEqual(data["product_count"], 1)  # BUG: still there, not removed
+
+    def test_creates_wishlist_if_none_exists(self):
+        """
+        get_or_create means removing from a nonexistent wishlist doesn't
+        error -- it creates an empty one first, then no-ops the removal.
+        """
+        self.assertFalse(Wishlist.objects.filter(user=self.user).exists())
+        response = self.client.post(reverse("remove_from_wishlist"), {"product_id": "product-1"})
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(Wishlist.objects.filter(user=self.user).exists())
+
+# expected / message
+    def test_success_response_shape(self):
+        wishlist = Wishlist.objects.create(user=self.user)
+        wishlist.add_product("product-1")
+
+        response = self.client.post(reverse("remove_from_wishlist"), {"product_id": "product-1"})
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(
+            set(data.keys()),
+            {"success", "message", "product_count"},
+        )
+        self.assertTrue(data["success"])
+        self.assertEqual(data["message"], "Product removed from wishlist")
+        self.assertEqual(data["product_count"], 0)
+
+    def test_error_message_matches_exactly(self):
+        response = self.client.post(reverse("remove_from_wishlist"), {})
+        self.assertEqual(response.status_code, 400)
+        data = response.json()
+        self.assertEqual(set(data.keys()), {"error"})
+        self.assertEqual(data["error"], "Product ID is required")
+
+    def test_product_count_decrements_correctly(self):
+        wishlist = Wishlist.objects.create(user=self.user)
+        wishlist.add_product("product-1")
+        wishlist.add_product("product-2")
+        wishlist.add_product("product-3")
+
+        response = self.client.post(reverse("remove_from_wishlist"), {"product_id": "product-2"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["product_count"], 2)
+
+        wishlist.refresh_from_db()
+        self.assertNotIn("product-2", wishlist.product_ids)
+        self.assertIn("product-1", wishlist.product_ids)
+        self.assertIn("product-3", wishlist.product_ids)
+
+    def test_remove_then_readd_same_product(self):
+        """
+        edge: remove followed by re-add should work cleanly, not be
+        blocked by any stale state.
+        """
+        wishlist = Wishlist.objects.create(user=self.user)
+        wishlist.add_product("product-1")
+
+        self.client.post(reverse("remove_from_wishlist"), {"product_id": "product-1"})
+        response = self.client.post(reverse("add_to_wishlist"), {"product_id": "product-1"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["product_count"], 1)
