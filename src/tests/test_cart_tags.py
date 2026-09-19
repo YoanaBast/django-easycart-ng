@@ -38,7 +38,7 @@ class CartTagsTest(TestCase):
         request.user = user if user is not None else AnonymousUser()
         return {"request": request}
 
-# get_cart_total_items
+    # get_cart_total_items
     def test_total_items_no_request_in_context(self):
         self.assertEqual(get_cart_total_items({}), 0)
 
@@ -59,7 +59,7 @@ class CartTagsTest(TestCase):
         cart.add_item(product_id="product-2", quantity=3, price=Decimal("5.00"))
         self.assertEqual(get_cart_total_items(self._context(self.user)), 5)
 
-# get_cart_total_price
+    # get_cart_total_price
     def test_total_price_no_request_in_context(self):
         self.assertEqual(get_cart_total_price({}), Decimal("0.00"))
 
@@ -67,12 +67,16 @@ class CartTagsTest(TestCase):
         self.assertEqual(get_cart_total_price(self._context()), Decimal("0.00"))
 
     def test_total_price_authenticated_no_cart(self):
-        self.assertEqual(get_cart_total_price(self._context(self.user)), Decimal("0.00"))
+        self.assertEqual(
+            get_cart_total_price(self._context(self.user)), Decimal("0.00")
+        )
 
     def test_total_price_authenticated_with_items(self):
         cart = Cart.objects.create(user=self.user)
         cart.add_item(product_id="product-1", quantity=2, price=Decimal("10.00"))
-        self.assertEqual(get_cart_total_price(self._context(self.user)), Decimal("20.00"))
+        self.assertEqual(
+            get_cart_total_price(self._context(self.user)), Decimal("20.00")
+        )
 
     def test_total_price_authenticated_empty_cart_type_inconsistent(self):
         """
@@ -88,7 +92,7 @@ class CartTagsTest(TestCase):
         self.assertEqual(result, 0)
         self.assertNotIsInstance(result, Decimal)  # documents the inconsistency
 
-# get_cart_item_count
+    # get_cart_item_count
     def test_item_count_no_product_id(self):
         self.assertEqual(get_cart_item_count(self._context(self.user)), 0)
 
@@ -119,11 +123,15 @@ class CartTagsTest(TestCase):
         matching rows, not just the first one found.
         """
         cart = Cart.objects.create(user=self.user)
-        cart.add_item(product_id="product-1", quantity=2, price=Decimal("10.00"), color="red")
-        cart.add_item(product_id="product-1", quantity=3, price=Decimal("10.00"), color="blue")
+        cart.add_item(
+            product_id="product-1", quantity=2, price=Decimal("10.00"), color="red"
+        )
+        cart.add_item(
+            product_id="product-1", quantity=3, price=Decimal("10.00"), color="blue"
+        )
         self.assertEqual(get_cart_item_count(self._context(self.user), "product-1"), 5)
 
-# multiply
+    # multiply
     def test_multiply_two_ints(self):
         self.assertEqual(multiply(2, 3), 6)
 
@@ -174,7 +182,7 @@ class CartTagsTest(TestCase):
         result = multiply(2, "abc")
         self.assertEqual(result, "abcabc")
 
-# currency_format
+    # currency_format
     def test_currency_format_int(self):
         self.assertEqual(currency_format(10), "$10.00")
 

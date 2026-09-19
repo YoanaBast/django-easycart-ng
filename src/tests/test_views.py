@@ -99,7 +99,9 @@ class CartDetailTest(TestCase):
 
     def test_auth_user_with_nonempty_cart_detail(self):
         existing_cart = Cart.objects.create(user=self.user)
-        existing_cart.add_item(product_id="test-product", quantity=2, price=Decimal("10.00"))
+        existing_cart.add_item(
+            product_id="test-product", quantity=2, price=Decimal("10.00")
+        )
 
         response = self.client.get(reverse("cart_detail"))
 
@@ -117,7 +119,7 @@ class CartDetailTest(TestCase):
         self.assertTrue(response.url.startswith("/accounts/login/"))
         self.assertIn("next=", response.url)
 
-# issue
+    # issue
     def test_total_price_type_when_cart_empty(self):
         """
         BUG: sum() over an empty queryset returns int 0, not Decimal("0.00"),
@@ -157,12 +159,17 @@ class AddToCartTest(TestCase):
         )
         self.client.login(username="testuser", password="testpass123")
 
-# auth
+    # auth
     def test_anonymous_user_redirected_to_login(self):
         self.client.logout()
-        response = self.client.post(reverse("add_to_cart"), {
-            "product_id": "test-product", "quantity": 1, "price": "10.00",
-        })
+        response = self.client.post(
+            reverse("add_to_cart"),
+            {
+                "product_id": "test-product",
+                "quantity": 1,
+                "price": "10.00",
+            },
+        )
         self.assertEqual(response.status_code, 302)
         self.assertTrue(response.url.startswith("/accounts/login/"))
 
@@ -199,16 +206,23 @@ class AddToCartTest(TestCase):
         csrf_token = get_token(request)
         csrf_client.cookies["csrftoken"] = csrf_token
 
-        response = csrf_client.post(reverse("add_to_cart"), {
-            "product_id": "test-product", "quantity": 1, "price": "10.00",
-            "csrfmiddlewaretoken": csrf_token,
-        })
+        response = csrf_client.post(
+            reverse("add_to_cart"),
+            {
+                "product_id": "test-product",
+                "quantity": 1,
+                "price": "10.00",
+                "csrfmiddlewaretoken": csrf_token,
+            },
+        )
         self.assertEqual(response.status_code, 200)
 
         item = CartItem.objects.get(id=response.json()["item_id"])
-        self.assertIn("csrfmiddlewaretoken", item.extra_data)  # BUG: should be assertNotIn
+        self.assertIn(
+            "csrfmiddlewaretoken", item.extra_data
+        )  # BUG: should be assertNotIn
 
-# product_id - edge
+    # product_id - edge
     def test_product_id_exceeds_max_length(self):
         """
         BUG: view never validates product_id length before saving.
@@ -220,26 +234,40 @@ class AddToCartTest(TestCase):
         add validator in the view
         """
         long_id = "x" * 500  # max_length=255
-        response = self.client.post(reverse("add_to_cart"), {
-            "product_id": long_id, "quantity": 1, "price": "10.00",
-        })
+        response = self.client.post(
+            reverse("add_to_cart"),
+            {
+                "product_id": long_id,
+                "quantity": 1,
+                "price": "10.00",
+            },
+        )
         self.assertEqual(response.status_code, 200)
 
     def test_no_product_id(self):
-        response = self.client.post(reverse("add_to_cart"), {
-            "quantity": 1, "price": "10.00",
-        })
+        response = self.client.post(
+            reverse("add_to_cart"),
+            {
+                "quantity": 1,
+                "price": "10.00",
+            },
+        )
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json()["error"], "Product ID is required")
 
     def test_empty_product_id(self):
-        response = self.client.post(reverse("add_to_cart"), {
-            "product_id": "", "quantity": 1, "price": "10.00",
-        })
+        response = self.client.post(
+            reverse("add_to_cart"),
+            {
+                "product_id": "",
+                "quantity": 1,
+                "price": "10.00",
+            },
+        )
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json()["error"], "Product ID is required")
 
-# quantity - edge
+    # quantity - edge
     def test_quantity_negative(self):
         """
         BUG: PositiveIntegerField's CHECK constraint blocks this at the DB,
@@ -249,9 +277,14 @@ class AddToCartTest(TestCase):
         add validator in the view
         """
         with self.assertRaises(IntegrityError):
-            self.client.post(reverse("add_to_cart"), {
-                "product_id": "test-product", "quantity": -5, "price": "10.00",
-            })
+            self.client.post(
+                reverse("add_to_cart"),
+                {
+                    "product_id": "test-product",
+                    "quantity": -5,
+                    "price": "10.00",
+                },
+            )
 
     def test_quantity_zero(self):
         """
@@ -261,15 +294,22 @@ class AddToCartTest(TestCase):
         PROPOSING FIX:
         add validator in the view, reject quantity <= 0
         """
-        response = self.client.post(reverse("add_to_cart"), {
-            "product_id": "test-product", "quantity": 0, "price": "10.00",
-        })
+        response = self.client.post(
+            reverse("add_to_cart"),
+            {
+                "product_id": "test-product",
+                "quantity": 0,
+                "price": "10.00",
+            },
+        )
         self.assertEqual(response.status_code, 200)
         data = response.json()
         self.assertTrue(data["success"])
         self.assertIsNotNone(data["item_id"])  # a row was created despite qty=0
         self.assertEqual(data["total_items"], 0)
-        self.assertEqual(Cart.objects.get(id=response.wsgi_request.user.cart.id).items.count(), 1)
+        self.assertEqual(
+            Cart.objects.get(id=response.wsgi_request.user.cart.id).items.count(), 1
+        )
 
     def test_quantity_zero_then_real_quantity_merges_into_same_row(self):
         """
@@ -281,15 +321,25 @@ class AddToCartTest(TestCase):
         PROPOSING FIX:
         same as test_quantity_zero — reject quantity <= 0 in the view
         """
-        first = self.client.post(reverse("add_to_cart"), {
-            "product_id": "test-product", "quantity": 0, "price": "10.00",
-        })
+        first = self.client.post(
+            reverse("add_to_cart"),
+            {
+                "product_id": "test-product",
+                "quantity": 0,
+                "price": "10.00",
+            },
+        )
         self.assertEqual(first.status_code, 200)
         first_item_id = first.json()["item_id"]
 
-        second = self.client.post(reverse("add_to_cart"), {
-            "product_id": "test-product", "quantity": 5, "price": "10.00",
-        })
+        second = self.client.post(
+            reverse("add_to_cart"),
+            {
+                "product_id": "test-product",
+                "quantity": 5,
+                "price": "10.00",
+            },
+        )
         self.assertEqual(second.status_code, 200)
         data = second.json()
 
@@ -310,9 +360,14 @@ class AddToCartTest(TestCase):
         PROPOSING FIX:
         add a sane max quantity check in the view
         """
-        response = self.client.post(reverse("add_to_cart"), {
-            "product_id": "test-product", "quantity": 10**9, "price": "10.00",
-        })
+        response = self.client.post(
+            reverse("add_to_cart"),
+            {
+                "product_id": "test-product",
+                "quantity": 10**9,
+                "price": "10.00",
+            },
+        )
         self.assertEqual(response.status_code, 200)
         data = response.json()
         self.assertTrue(data["success"])
@@ -327,9 +382,14 @@ class AddToCartTest(TestCase):
         PROPOSING FIX: wrap the int() cast in try/except, return 400.
         """
         with self.assertRaises(ValueError):
-            self.client.post(reverse("add_to_cart"), {
-                "product_id": "test-product", "quantity": "abc", "price": "10.00",
-            })
+            self.client.post(
+                reverse("add_to_cart"),
+                {
+                    "product_id": "test-product",
+                    "quantity": "abc",
+                    "price": "10.00",
+                },
+            )
 
     def test_quantity_float_string(self):
         """
@@ -337,11 +397,16 @@ class AddToCartTest(TestCase):
         form input but aren't accepted.
         """
         with self.assertRaises(ValueError):
-            self.client.post(reverse("add_to_cart"), {
-                "product_id": "test-product", "quantity": "2.5", "price": "10.00",
-            })
+            self.client.post(
+                reverse("add_to_cart"),
+                {
+                    "product_id": "test-product",
+                    "quantity": "2.5",
+                    "price": "10.00",
+                },
+            )
 
-# price - edge
+    # price - edge
     def test_price_negative(self):
         """
         BUG: no sign check anywhere, silently succeeds with a negative price
@@ -349,9 +414,14 @@ class AddToCartTest(TestCase):
         PROPOSING FIX:
         add validator in the view, reject price < 0
         """
-        response = self.client.post(reverse("add_to_cart"), {
-            "product_id": "test-product", "quantity": 1, "price": "-10.00",
-        })
+        response = self.client.post(
+            reverse("add_to_cart"),
+            {
+                "product_id": "test-product",
+                "quantity": 1,
+                "price": "-10.00",
+            },
+        )
         self.assertEqual(response.status_code, 200)
         data = response.json()
         self.assertTrue(data["success"])
@@ -361,9 +431,14 @@ class AddToCartTest(TestCase):
         """
         Free item 0.00 price
         """
-        response = self.client.post(reverse("add_to_cart"), {
-            "product_id": "test-product", "quantity": 1, "price": "0.00",
-        })
+        response = self.client.post(
+            reverse("add_to_cart"),
+            {
+                "product_id": "test-product",
+                "quantity": 1,
+                "price": "0.00",
+            },
+        )
         self.assertEqual(response.status_code, 200)
         data = response.json()
         self.assertTrue(data["success"])
@@ -376,9 +451,13 @@ class AddToCartTest(TestCase):
         add_item's `price or Decimal("0.00")` catches that None and
         defaults it to zero.
         """
-        response = self.client.post(reverse("add_to_cart"), {
-            "product_id": "test-product", "quantity": 1,
-        })
+        response = self.client.post(
+            reverse("add_to_cart"),
+            {
+                "product_id": "test-product",
+                "quantity": 1,
+            },
+        )
         self.assertEqual(response.status_code, 200)
         data = response.json()
         self.assertTrue(data["success"])
@@ -396,9 +475,14 @@ class AddToCartTest(TestCase):
         add validator in the view, check digit count before saving
         """
         with self.assertRaises(InvalidOperation):
-            self.client.post(reverse("add_to_cart"), {
-                "product_id": "test-product", "quantity": 1, "price": "99999999999.99",
-            })
+            self.client.post(
+                reverse("add_to_cart"),
+                {
+                    "product_id": "test-product",
+                    "quantity": 1,
+                    "price": "99999999999.99",
+                },
+            )
 
     def test_price_non_numeric_string(self):
         """
@@ -412,16 +496,27 @@ class AddToCartTest(TestCase):
         try/except InvalidOperation, return 400 on failure.
         """
         with self.assertRaises(Exception):
-            self.client.post(reverse("add_to_cart"), {
-                "product_id": "test-product", "quantity": 1, "price": "abc",
-            })
+            self.client.post(
+                reverse("add_to_cart"),
+                {
+                    "product_id": "test-product",
+                    "quantity": 1,
+                    "price": "abc",
+                },
+            )
 
-# expected
+    # expected
     def test_extra_data_passed_to_cart_item_expected(self):
-        response = self.client.post(reverse("add_to_cart"), {
-            "product_id": "test-product", "quantity": 1, "price": "10.00",
-            "color": "red", "size": "M",
-        })
+        response = self.client.post(
+            reverse("add_to_cart"),
+            {
+                "product_id": "test-product",
+                "quantity": 1,
+                "price": "10.00",
+                "color": "red",
+                "size": "M",
+            },
+        )
         self.assertEqual(response.status_code, 200)
         data = response.json()
         self.assertTrue(data["success"])
@@ -433,9 +528,14 @@ class AddToCartTest(TestCase):
         self.assertEqual(item.extra_data, {"color": "red", "size": "M"})
 
     def test_no_extra_data_passed_to_cart_item_expected(self):
-        response = self.client.post(reverse("add_to_cart"), {
-            "product_id": "test-product", "quantity": 1, "price": "10.00",
-        })
+        response = self.client.post(
+            reverse("add_to_cart"),
+            {
+                "product_id": "test-product",
+                "quantity": 1,
+                "price": "10.00",
+            },
+        )
         self.assertEqual(response.status_code, 200)
         data = response.json()
         self.assertTrue(data["success"])
@@ -455,7 +555,8 @@ class RemoveFromCartTest(TestCase):
             email="test@example.com",
         )
         self.client.login(username="testuser", password="testpass123")
-# auth
+
+    # auth
     def test_anonymous_user_redirected_to_login(self):
         self.client.logout()
         response = self.client.post(reverse("remove_from_cart"), {"item_id": 1})
@@ -466,7 +567,7 @@ class RemoveFromCartTest(TestCase):
         response = self.client.get(reverse("remove_from_cart"))
         self.assertEqual(response.status_code, 405)
 
-# item_id - edge
+    # item_id - edge
     def test_no_item_id(self):
         response = self.client.post(reverse("remove_from_cart"), {})
         self.assertEqual(response.status_code, 400)
@@ -504,10 +605,12 @@ class RemoveFromCartTest(TestCase):
         with self.assertRaises(ValueError):
             self.client.post(reverse("remove_from_cart"), {"item_id": "abc"})
 
-# expected
+    # expected
     def test_success_response_shape(self):
         cart = Cart.objects.create(user=self.user)
-        item = cart.add_item(product_id="test-product", quantity=2, price=Decimal("10.00"))
+        item = cart.add_item(
+            product_id="test-product", quantity=2, price=Decimal("10.00")
+        )
 
         response = self.client.post(reverse("remove_from_cart"), {"item_id": item.id})
         self.assertEqual(response.status_code, 200)
@@ -533,12 +636,16 @@ class UpdateCartQuantityTest(TestCase):
         )
         self.client.login(username="testuser", password="testpass123")
 
-# auth
+    # auth
     def test_anonymous_user_redirected_to_login(self):
         self.client.logout()
-        response = self.client.post(reverse("update_cart_quantity"), {
-            "item_id": 1, "quantity": 2,
-        })
+        response = self.client.post(
+            reverse("update_cart_quantity"),
+            {
+                "item_id": 1,
+                "quantity": 2,
+            },
+        )
         self.assertEqual(response.status_code, 302)
         self.assertTrue(response.url.startswith("/accounts/login/"))
 
@@ -546,16 +653,20 @@ class UpdateCartQuantityTest(TestCase):
         response = self.client.get(reverse("update_cart_quantity"))
         self.assertEqual(response.status_code, 405)
 
-# item_id - edge
+    # item_id - edge
     def test_no_item_id(self):
         response = self.client.post(reverse("update_cart_quantity"), {"quantity": 2})
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json()["error"], "Item ID is required")
 
     def test_empty_item_id(self):
-        response = self.client.post(reverse("update_cart_quantity"), {
-            "item_id": "", "quantity": 2,
-        })
+        response = self.client.post(
+            reverse("update_cart_quantity"),
+            {
+                "item_id": "",
+                "quantity": 2,
+            },
+        )
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json()["error"], "Item ID is required")
 
@@ -565,9 +676,13 @@ class UpdateCartQuantityTest(TestCase):
         View correctly catches CartItem.DoesNotExist -> 404.
         """
         cart = Cart.objects.create(user=self.user)
-        response = self.client.post(reverse("update_cart_quantity"), {
-            "item_id": 99999, "quantity": 2,
-        })
+        response = self.client.post(
+            reverse("update_cart_quantity"),
+            {
+                "item_id": 99999,
+                "quantity": 2,
+            },
+        )
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.json()["error"], "Item not found")
 
@@ -583,22 +698,34 @@ class UpdateCartQuantityTest(TestCase):
         """
         cart = Cart.objects.create(user=self.user)
         with self.assertRaises(ValueError):
-            self.client.post(reverse("update_cart_quantity"), {
-                "item_id": "abc", "quantity": 2,
-            })
+            self.client.post(
+                reverse("update_cart_quantity"),
+                {
+                    "item_id": "abc",
+                    "quantity": 2,
+                },
+            )
 
-# quantity - edge
+    # quantity - edge
     def test_quantity_zero(self):
-        response = self.client.post(reverse("update_cart_quantity"), {
-            "item_id": 1, "quantity": 0,
-        })
+        response = self.client.post(
+            reverse("update_cart_quantity"),
+            {
+                "item_id": 1,
+                "quantity": 0,
+            },
+        )
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json()["error"], "Quantity must be greater than 0")
 
     def test_quantity_negative(self):
-        response = self.client.post(reverse("update_cart_quantity"), {
-            "item_id": 1, "quantity": -5,
-        })
+        response = self.client.post(
+            reverse("update_cart_quantity"),
+            {
+                "item_id": 1,
+                "quantity": -5,
+            },
+        )
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json()["error"], "Quantity must be greater than 0")
 
@@ -611,9 +738,13 @@ class UpdateCartQuantityTest(TestCase):
         PROPOSING FIX: wrap the int() cast in try/except and return 400.
         """
         with self.assertRaises(ValueError):
-            self.client.post(reverse("update_cart_quantity"), {
-                "item_id": 1, "quantity": "abc",
-            })
+            self.client.post(
+                reverse("update_cart_quantity"),
+                {
+                    "item_id": 1,
+                    "quantity": "abc",
+                },
+            )
 
     def test_quantity_float_string(self):
         """
@@ -621,9 +752,13 @@ class UpdateCartQuantityTest(TestCase):
         even though they look like valid POST input from a form.
         """
         with self.assertRaises(ValueError):
-            self.client.post(reverse("update_cart_quantity"), {
-                "item_id": 1, "quantity": "2.5",
-            })
+            self.client.post(
+                reverse("update_cart_quantity"),
+                {
+                    "item_id": 1,
+                    "quantity": "2.5",
+                },
+            )
 
     def test_quantity_missing_defaults_to_one(self):
         """
@@ -631,9 +766,13 @@ class UpdateCartQuantityTest(TestCase):
         silently defaults to 1 rather than erroring.
         """
         cart = Cart.objects.create(user=self.user)
-        item = cart.add_item(product_id="test-product", quantity=5, price=Decimal("10.00"))
+        item = cart.add_item(
+            product_id="test-product", quantity=5, price=Decimal("10.00")
+        )
 
-        response = self.client.post(reverse("update_cart_quantity"), {"item_id": item.id})
+        response = self.client.post(
+            reverse("update_cart_quantity"), {"item_id": item.id}
+        )
         self.assertEqual(response.status_code, 200)
         item.refresh_from_db()
         self.assertEqual(item.quantity, 1)
@@ -645,24 +784,36 @@ class UpdateCartQuantityTest(TestCase):
         PROPOSING FIX: add a sane max quantity check, shared with add_to_cart.
         """
         cart = Cart.objects.create(user=self.user)
-        item = cart.add_item(product_id="test-product", quantity=1, price=Decimal("10.00"))
+        item = cart.add_item(
+            product_id="test-product", quantity=1, price=Decimal("10.00")
+        )
 
-        response = self.client.post(reverse("update_cart_quantity"), {
-            "item_id": item.id, "quantity": 10**9,
-        })
+        response = self.client.post(
+            reverse("update_cart_quantity"),
+            {
+                "item_id": item.id,
+                "quantity": 10**9,
+            },
+        )
         self.assertEqual(response.status_code, 200)
         data = response.json()
         self.assertTrue(data["success"])
         self.assertEqual(data["total_items"], 10**9)
 
-# expected
+    # expected
     def test_success_response_shape(self):
         cart = Cart.objects.create(user=self.user)
-        item = cart.add_item(product_id="test-product", quantity=1, price=Decimal("10.00"))
+        item = cart.add_item(
+            product_id="test-product", quantity=1, price=Decimal("10.00")
+        )
 
-        response = self.client.post(reverse("update_cart_quantity"), {
-            "item_id": item.id, "quantity": 3,
-        })
+        response = self.client.post(
+            reverse("update_cart_quantity"),
+            {
+                "item_id": item.id,
+                "quantity": 3,
+            },
+        )
         self.assertEqual(response.status_code, 200)
         data = response.json()
         self.assertEqual(
@@ -687,7 +838,7 @@ class ClearCartTest(TestCase):
         )
         self.client.login(username="testuser", password="testpass123")
 
-# auth
+    # auth
     def test_anonymous_user_redirected_to_login(self):
         self.client.logout()
         response = self.client.get(reverse("clear_cart"))
@@ -712,7 +863,7 @@ class ClearCartTest(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(cart.items.count(), 0)  # GET alone cleared the cart
 
-# expected
+    # expected
     def test_success_response_shape(self):
         cart = Cart.objects.create(user=self.user)
         cart.add_item(product_id="test-product", quantity=2, price=Decimal("10.00"))
@@ -761,7 +912,7 @@ class ClearCartTest(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertTrue(Cart.objects.filter(user=self.user).exists())
 
-# issue
+    # issue
     def test_total_price_response_hardcoded_not_computed(self):
         """
         Documents current behavior: total_price is a hardcoded "0.00"
@@ -788,7 +939,7 @@ class WishListDetailTest(TestCase):
         )
         self.client.login(username="testuser", password="testpass123")
 
-# auth
+    # auth
     def test_anonymous_user_redirected_to_login(self):
         self.client.logout()
         response = self.client.get(reverse("wishlist_detail"))
@@ -817,7 +968,8 @@ class WishListDetailTest(TestCase):
         response = self.client.get(reverse("wishlist_detail"))
         self.assertEqual(response.status_code, 302)
         self.assertTrue(response.url.startswith("/accounts/login/"))
-# expected
+
+    # expected
     def test_auth_user_no_wishlist_yet(self):
         """
         get_or_create means a wishlist is created on first visit if
@@ -922,10 +1074,12 @@ class AddToWishlistTest(TestCase):
         )
         self.client.login(username="testuser", password="testpass123")
 
-# auth
+    # auth
     def test_anonymous_user_redirected_to_login(self):
         self.client.logout()
-        response = self.client.post(reverse("add_to_wishlist"), {"product_id": "product-1"})
+        response = self.client.post(
+            reverse("add_to_wishlist"), {"product_id": "product-1"}
+        )
         self.assertEqual(response.status_code, 302)
         self.assertTrue(response.url.startswith("/accounts/login/"))
 
@@ -933,7 +1087,7 @@ class AddToWishlistTest(TestCase):
         response = self.client.get(reverse("add_to_wishlist"))
         self.assertEqual(response.status_code, 405)
 
-# product_id - edge
+    # product_id - edge
     def test_no_product_id(self):
         response = self.client.post(reverse("add_to_wishlist"), {})
         self.assertEqual(response.status_code, 400)
@@ -980,14 +1134,18 @@ class AddToWishlistTest(TestCase):
         shouldn't increase on a repeat add of the same id.
         """
         self.client.post(reverse("add_to_wishlist"), {"product_id": "product-1"})
-        response = self.client.post(reverse("add_to_wishlist"), {"product_id": "product-1"})
+        response = self.client.post(
+            reverse("add_to_wishlist"), {"product_id": "product-1"}
+        )
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["product_count"], 1)
 
-# expected / message
+    # expected / message
     def test_success_response_shape(self):
-        response = self.client.post(reverse("add_to_wishlist"), {"product_id": "product-1"})
+        response = self.client.post(
+            reverse("add_to_wishlist"), {"product_id": "product-1"}
+        )
         self.assertEqual(response.status_code, 200)
         data = response.json()
         self.assertEqual(
@@ -1017,7 +1175,9 @@ class AddToWishlistTest(TestCase):
 
     def test_creates_wishlist_if_none_exists(self):
         self.assertFalse(Wishlist.objects.filter(user=self.user).exists())
-        response = self.client.post(reverse("add_to_wishlist"), {"product_id": "product-1"})
+        response = self.client.post(
+            reverse("add_to_wishlist"), {"product_id": "product-1"}
+        )
         self.assertEqual(response.status_code, 200)
         self.assertTrue(Wishlist.objects.filter(user=self.user).exists())
 
@@ -1036,7 +1196,9 @@ class ModelStrMethodsTest(TestCase):
 
     def test_cart_item_str(self):
         cart = Cart.objects.create(user=self.user)
-        item = cart.add_item(product_id="test-product", quantity=3, price=Decimal("10.00"))
+        item = cart.add_item(
+            product_id="test-product", quantity=3, price=Decimal("10.00")
+        )
         self.assertEqual(str(item), f"3 x test-product (cart #{cart.id})")
 
     def test_wishlist_str(self):
@@ -1053,10 +1215,12 @@ class RemoveFromWishlistTest(TestCase):
         )
         self.client.login(username="testuser", password="testpass123")
 
-# auth
+    # auth
     def test_anonymous_user_redirected_to_login(self):
         self.client.logout()
-        response = self.client.post(reverse("remove_from_wishlist"), {"product_id": "product-1"})
+        response = self.client.post(
+            reverse("remove_from_wishlist"), {"product_id": "product-1"}
+        )
         self.assertEqual(response.status_code, 302)
         self.assertTrue(response.url.startswith("/accounts/login/"))
 
@@ -1064,7 +1228,7 @@ class RemoveFromWishlistTest(TestCase):
         response = self.client.get(reverse("remove_from_wishlist"))
         self.assertEqual(response.status_code, 405)
 
-# product_id - edge
+    # product_id - edge
     def test_no_product_id(self):
         response = self.client.post(reverse("remove_from_wishlist"), {})
         self.assertEqual(response.status_code, 400)
@@ -1085,7 +1249,9 @@ class RemoveFromWishlistTest(TestCase):
         wishlist = Wishlist.objects.create(user=self.user)
         wishlist.add_product("product-1")
 
-        response = self.client.post(reverse("remove_from_wishlist"), {"product_id": "does-not-exist"})
+        response = self.client.post(
+            reverse("remove_from_wishlist"), {"product_id": "does-not-exist"}
+        )
         self.assertEqual(response.status_code, 200)
         data = response.json()
         self.assertTrue(data["success"])
@@ -1093,7 +1259,9 @@ class RemoveFromWishlistTest(TestCase):
 
     def test_remove_from_empty_wishlist_is_noop(self):
         wishlist = Wishlist.objects.create(user=self.user)
-        response = self.client.post(reverse("remove_from_wishlist"), {"product_id": "anything"})
+        response = self.client.post(
+            reverse("remove_from_wishlist"), {"product_id": "anything"}
+        )
         self.assertEqual(response.status_code, 200)
         data = response.json()
         self.assertTrue(data["success"])
@@ -1115,7 +1283,9 @@ class RemoveFromWishlistTest(TestCase):
         wishlist.add_product(1)  # stored as int
         self.assertEqual(wishlist.get_product_count(), 1)
 
-        response = self.client.post(reverse("remove_from_wishlist"), {"product_id": "1"})
+        response = self.client.post(
+            reverse("remove_from_wishlist"), {"product_id": "1"}
+        )
         self.assertEqual(response.status_code, 200)
         data = response.json()
         self.assertTrue(data["success"])
@@ -1127,16 +1297,20 @@ class RemoveFromWishlistTest(TestCase):
         error -- it creates an empty one first, then no-ops the removal.
         """
         self.assertFalse(Wishlist.objects.filter(user=self.user).exists())
-        response = self.client.post(reverse("remove_from_wishlist"), {"product_id": "product-1"})
+        response = self.client.post(
+            reverse("remove_from_wishlist"), {"product_id": "product-1"}
+        )
         self.assertEqual(response.status_code, 200)
         self.assertTrue(Wishlist.objects.filter(user=self.user).exists())
 
-# expected / message
+    # expected / message
     def test_success_response_shape(self):
         wishlist = Wishlist.objects.create(user=self.user)
         wishlist.add_product("product-1")
 
-        response = self.client.post(reverse("remove_from_wishlist"), {"product_id": "product-1"})
+        response = self.client.post(
+            reverse("remove_from_wishlist"), {"product_id": "product-1"}
+        )
         self.assertEqual(response.status_code, 200)
         data = response.json()
         self.assertEqual(
@@ -1160,7 +1334,9 @@ class RemoveFromWishlistTest(TestCase):
         wishlist.add_product("product-2")
         wishlist.add_product("product-3")
 
-        response = self.client.post(reverse("remove_from_wishlist"), {"product_id": "product-2"})
+        response = self.client.post(
+            reverse("remove_from_wishlist"), {"product_id": "product-2"}
+        )
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["product_count"], 2)
 
@@ -1178,7 +1354,9 @@ class RemoveFromWishlistTest(TestCase):
         wishlist.add_product("product-1")
 
         self.client.post(reverse("remove_from_wishlist"), {"product_id": "product-1"})
-        response = self.client.post(reverse("add_to_wishlist"), {"product_id": "product-1"})
+        response = self.client.post(
+            reverse("add_to_wishlist"), {"product_id": "product-1"}
+        )
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["product_count"], 1)

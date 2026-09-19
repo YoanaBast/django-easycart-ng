@@ -17,8 +17,16 @@ Including another URLconf
 
 from django.contrib import admin
 from django.urls import path
-from cart.views import add_to_cart, cart_detail, remove_from_cart, update_cart_quantity, clear_cart, wishlist_detail, \
-    add_to_wishlist, remove_from_wishlist
+from cart.views import (
+    add_to_cart,
+    cart_detail,
+    remove_from_cart,
+    update_cart_quantity,
+    clear_cart,
+    wishlist_detail,
+    add_to_wishlist,
+    remove_from_wishlist,
+)
 
 urlpatterns = [
     path("admin/", admin.site.urls),
@@ -30,5 +38,4 @@ urlpatterns = [
     path("cart/wishlist/", wishlist_detail, name="wishlist_detail"),
     path("cart/wishlist/add", add_to_wishlist, name="add_to_wishlist"),
     path("cart/wishlist/remove/", remove_from_wishlist, name="remove_from_wishlist"),
-
 ]
