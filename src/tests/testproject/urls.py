@@ -17,15 +17,16 @@ Including another URLconf
 
 from django.contrib import admin
 from django.urls import path
+
 from cart.views import (
     add_to_cart,
-    cart_detail,
-    remove_from_cart,
-    update_cart_quantity,
-    clear_cart,
-    wishlist_detail,
     add_to_wishlist,
+    cart_detail,
+    clear_cart,
+    remove_from_cart,
     remove_from_wishlist,
+    update_cart_quantity,
+    wishlist_detail,
 )
 
 urlpatterns = [

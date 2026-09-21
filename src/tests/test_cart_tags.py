@@ -10,15 +10,15 @@ from decimal import Decimal
 
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import AnonymousUser
-from django.test import TestCase, RequestFactory
+from django.test import RequestFactory, TestCase
 
 from cart.models import Cart
 from cart.templatetags.cart_tags import (
+    currency_format,
+    get_cart_item_count,
     get_cart_total_items,
     get_cart_total_price,
-    get_cart_item_count,
     multiply,
-    currency_format,
 )
 
 User = get_user_model()

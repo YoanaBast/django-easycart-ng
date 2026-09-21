@@ -18,7 +18,7 @@ from decimal import Decimal, InvalidOperation
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import AnonymousUser
 from django.db.utils import IntegrityError
-from django.test import TestCase, RequestFactory, Client
+from django.test import Client, RequestFactory, TestCase
 from django.urls import reverse
 
 from cart.models import Cart, CartItem, Wishlist
